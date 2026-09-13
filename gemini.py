@@ -1,11 +1,11 @@
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
-from PIL import Image
-import io
+import base64
+from google import genai
+from google.genai import types
 from config import Config
 
+
 class GeminiClient:
-    """Клиент для работы с Google Gemini API"""
+    """Клиент для работы с Google Gemini API (новый SDK)"""
     
     SYSTEM_PROMPT = """Ты - опытный и внимательный учитель. Твоя задача - тщательно проверить домашнюю работу ученика.
 
@@ -22,25 +22,8 @@ class GeminiClient:
     
     def __init__(self, config: Config):
         self.config = config
-        genai.configure(api_key=config.google_api_key)
-        
-        # Настройки безопасности
-        self.safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
-        
-        self.model = genai.GenerativeModel(
-            model_name=config.model,
-            generation_config={
-                "temperature": 0.3,
-                "top_p": 0.8,
-                "max_output_tokens": 4000,
-            },
-            safety_settings=self.safety_settings
-        )
+        self.client = genai.Client(api_key=config.google_api_key)
+        self.model_name = config.model
     
     async def check_homework(self, task_photos_bytes: list, student_photos_bytes: list, captions: list = None) -> str:
         """Проверить домашнюю работу через Gemini"""
@@ -50,34 +33,50 @@ class GeminiClient:
             return "❌ Нет фотографий работ учеников"
         
         try:
-            # Формируем контент для Gemini
-            content_parts = []
+            # Формируем содержимое запроса
+            contents = []
             
-            # Добавляем системный промпт
-            content_parts.append(f"СИСТЕМНАЯ ИНСТРУКЦИЯ: {self.SYSTEM_PROMPT}\n\n")
+            # Системный промпт и заголовок
+            text_parts = [f"ИНСТРУКЦИЯ: {self.SYSTEM_PROMPT}\n\n"]
             
-            # Добавляем фото задания
-            content_parts.append("📋 ФОТОГРАФИИ С ЗАДАНИЕМ:\n")
+            # Фото задания
+            text_parts.append("📋 ФОТОГРАФИИ С ЗАДАНИЕМ:\n")
             for i, photo_bytes in enumerate(task_photos_bytes, 1):
-                content_parts.append(f"Задание - фото {i}:\n")
-                content_parts.append({"mime_type": "image/jpeg", "data": photo_bytes})
+                text_parts.append(f"Задание - фото {i}:\n")
+                contents.append(types.Part.from_bytes(data=photo_bytes, mime_type="image/jpeg"))
             
-            # Добавляем фото работ учеников
-            content_parts.append("\n\n📝 РАБОТЫ УЧЕНИКОВ:\n")
+            # Фото работ учеников
+            text_parts.append("\n📝 РАБОТЫ УЧЕНИКОВ:\n")
             for i, (photo_bytes, caption) in enumerate(zip(student_photos_bytes, captions or []), 1):
                 if caption:
-                    content_parts.append(f"\nРабота ученика {i} ({caption}):\n")
+                    text_parts.append(f"\nРабота ученика {i} ({caption}):\n")
                 else:
-                    content_parts.append(f"\nРабота ученика {i}:\n")
-                content_parts.append({"mime_type": "image/jpeg", "data": photo_bytes})
+                    text_parts.append(f"\nРабота ученика {i}:\n")
+                contents.append(types.Part.from_bytes(data=photo_bytes, mime_type="image/jpeg"))
+            
+            # Добавляем текстовую часть в начало
+            contents.insert(0, types.Part.from_text(text="".join(text_parts)))
             
             # Отправляем запрос
-            response = await self.model.generate_content_async(content_parts)
+            response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    temperature=0.3,
+                    top_p=0.8,
+                    max_output_tokens=4000,
+                    system_instruction=self.SYSTEM_PROMPT
+                )
+            )
             
-            if not response.candidates:
+            if not response.text:
                 return "❌ Модель не смогла сгенерировать ответ"
             
             return response.text
         
         except Exception as e:
             return f"❌ Ошибка при запросе к API: {str(e)}"
+    
+    async def close(self):
+        """Закрытие клиента (если нужно)"""
+        pass
