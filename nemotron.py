@@ -21,12 +21,18 @@ class NemotronClient:
     
     def __init__(self, config: Config):
         self.config = config
-        self.session = aiohttp.ClientSession(
-            headers={
-                "Authorization": f"Bearer {config.api_key}",
-                "Content-Type": "application/json"
-            }
-        )
+        self.session = None  # Сессия создаётся позже
+    
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Ленивое создание сессии"""
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(
+                headers={
+                    "Authorization": f"Bearer {self.config.api_key}",
+                    "Content-Type": "application/json"
+                }
+            )
+        return self.session
     
     async def check_homework(self, task: str, photos_base64: list, captions: list = None) -> str:
         """Проверить домашнюю работу через AI"""
@@ -58,8 +64,10 @@ class NemotronClient:
             "temperature": 0.3
         }
         
+        session = await self._get_session()
+        
         try:
-            async with self.session.post(
+            async with session.post(
                 f"{self.config.api_base}/chat/completions",
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=120)
@@ -75,4 +83,5 @@ class NemotronClient:
             return f"❌ Ошибка при запросе к API: {str(e)}"
     
     async def close(self):
-        await self.session.close()
+        if self.session and not self.session.closed:
+            await self.session.close()
