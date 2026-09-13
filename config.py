@@ -8,5 +8,5 @@ class Config:
     teacher_id: int = int(os.environ.get("TEACHER_ID", "827744412"))
     webhook_url: str = os.environ.get("RENDER_EXTERNAL_URL", "")
     port: int = int(os.environ.get("PORT", "8000"))
-    model: str = "nemotron-3-nano-omni-30b-a3b-reasoning"
+    model: str = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"  # ← Исправлено!
     api_base: str = "https://api.tokenrouter.com/v1"
