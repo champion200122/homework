@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from aiohttp import web
+from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Update
@@ -43,9 +43,20 @@ async def health_handler(request: web.Request) -> web.Response:
     })
 
 
+async def auto_ping(config: Config):
+    """Автопинг, чтобы Render не усыплял сервис"""
+    while True:
+        try:
+            await asyncio.sleep(600)  # 10 минут
+            async with ClientSession() as session:
+                async with session.get(f"{config.webhook_url}/ping", timeout=30) as resp:
+                    logger.info(f"🔄 Автопинг: {resp.status}")
+        except Exception as e:
+            logger.warning(f"Ошибка автопинга: {e}")
+
+
 async def on_startup(bot: Bot, config: Config):
     """Действия при запуске"""
-    # Устанавливаем webhook
     webhook_url = f"{config.webhook_url}/webhook"
     await bot.set_webhook(webhook_url, drop_pending_updates=True)
     logger.info(f"✅ Webhook установлен: {webhook_url}")
@@ -67,6 +78,8 @@ async def main():
         raise ValueError("TELEGRAM_BOT_TOKEN не установлен!")
     if not config.api_key:
         raise ValueError("API_TOKENROUTER_KEY не установлен!")
+    if not config.webhook_url:
+        raise ValueError("RENDER_EXTERNAL_URL не установлен!")
     
     # Инициализируем бота
     bot = Bot(token=config.bot_token)
@@ -82,7 +95,7 @@ async def main():
     app.router.add_post("/webhook", lambda r: webhook_handler(r, bot, dp))
     app.router.add_get("/ping", ping_handler)
     app.router.add_get("/health", health_handler)
-    app.router.add_get("/", ping_handler)  # Корень тоже отвечает 200
+    app.router.add_get("/", ping_handler)
     
     # Хуки жизненного цикла
     app.on_startup.append(lambda _: on_startup(bot, config))
@@ -96,6 +109,10 @@ async def main():
     await site.start()
     
     logger.info(f"🚀 Сервер запущен на порту {config.port}")
+    
+    # Запускаем автопинг как фоновую задачу
+    asyncio.create_task(auto_ping(config))
+    logger.info("🔄 Автопинг запущен (каждые 10 минут)")
     
     # Держим процесс активным
     try:
