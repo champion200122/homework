@@ -1,24 +1,23 @@
-import base64
 from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram import Bot
 
 from storage import storage
 from config import Config
-from nemotron import NemotronClient
+from gemini import GeminiClient
 from keyboards import get_main_menu
 
 router = Router()
 
 class HomeworkStates(StatesGroup):
-    waiting_for_task = State()
+    waiting_for_task = State()  # Ожидание фото задания
+    waiting_for_student_work = State()  # Ожидание фото работ
 
-# Инициализация клиента
+# Инициализация
 config = Config()
-nemotron = NemotronClient(config)
+gemini = GeminiClient(config)
 
 
 def check_teacher(message: Message) -> bool:
@@ -37,10 +36,10 @@ async def cmd_start(message: Message):
         f"👋 Здравствуйте!\n\n"
         f"Я - бот для проверки домашних заданий.\n\n"
         f"📌 <b>Как пользоваться:</b>\n"
-        f"1. Нажмите '📝 Новое задание' и отправьте текст задания\n"
-        f"2. Пересылайте фотографии тетрадей учеников\n"
-        f"3. Нажмите '📷 Проверить тетради' для анализа\n\n"
-        f"Вы также можете напрямую переслать фото - я автоматически добавлю его в очередь проверки.",
+        f"1. Нажмите '📝 Новое задание' и отправьте фото задания (учебник/распечатка)\n"
+        f"2. Нажмите '📷 Добавить работы' и перешлите фото тетрадей учеников\n"
+        f"3. Нажмите '🔍 Проверить работы' для анализа\n\n"
+        f"Вы также можете напрямую переслать фото работ - они автоматически добавятся в очередь.",
         parse_mode="HTML",
         reply_markup=get_main_menu()
     )
@@ -52,30 +51,74 @@ async def btn_new_task(message: Message, state: FSMContext):
     if not check_teacher(message):
         return
     
+    storage.clear_task()
     await message.answer(
-        "📝 <b>Пришлите текст задания</b>\n\n"
-        "Можно переслать сообщение или написать новый текст.\n"
+        "📝 <b>Пришлите фотографии задания</b>\n\n"
+        "Можно отправить несколько фото (учебник, распечатка, доска и т.д.).\n"
+        "Когда закончите, нажмите '✅ Готово'.\n\n"
         "Отправьте /cancel для отмены.",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=get_task_menu()
     )
     await state.set_state(HomeworkStates.waiting_for_task)
 
 
-@router.message(F.text == "🗑️ Очистить задание")
-async def btn_clear_task(message: Message):
-    """Очистка задания и всех работ"""
+@router.message(F.text == "✅ Готово", StateFilter(HomeworkStates.waiting_for_task))
+async def btn_task_done(message: Message, state: FSMContext):
+    """Завершение загрузки задания"""
     if not check_teacher(message):
         return
     
-    storage.clear_task()
+    if not storage.has_task():
+        await message.answer("⚠️ Вы не добавили ни одного фото задания!")
+        return
+    
+    await state.clear()
     await message.answer(
-        "✅ Задание и все работы очищены!\n\n"
-        "Можете установить новое задание.",
+        f"✅ <b>Задание установлено!</b>\n\n"
+        f"Добавлено фото: {len(storage.task_photos)}\n\n"
+        f"Теперь нажмите '📷 Добавить работы' и перешлите фото тетрадей учеников.",
+        parse_mode="HTML",
         reply_markup=get_main_menu()
     )
 
 
-@router.message(F.text == "📷 Проверить тетради")
+@router.message(StateFilter(HomeworkStates.waiting_for_task), F.photo)
+async def receive_task_photo(message: Message):
+    """Получение фото задания"""
+    if not check_teacher(message):
+        return
+    
+    photo = message.photo[-1]
+    num = storage.add_task_photo(photo.file_id)
+    
+    await message.answer(f"✅ Фото задания добавлено (#{num})")
+
+
+@router.message(F.text == "📷 Добавить работы")
+async def btn_add_works(message: Message, state: FSMContext):
+    """Добавление работ учеников"""
+    if not check_teacher(message):
+        return
+    
+    if not storage.has_task():
+        await message.answer(
+            "⚠️ Сначала установите задание!\n"
+            "Нажмите '📝 Новое задание'.",
+            reply_markup=get_main_menu()
+        )
+        return
+    
+    await message.answer(
+        "📷 <b>Перешлите фотографии тетрадей учеников</b>\n\n"
+        "Можно отправить по одному или пачкой.\n"
+        "Когда будете готовы проверить, нажмите '🔍 Проверить работы'.",
+        parse_mode="HTML",
+        reply_markup=get_main_menu()
+    )
+
+
+@router.message(F.text == "🔍 Проверить работы")
 async def btn_check_photos(message: Message):
     """Проверка всех накопленных фото"""
     if not check_teacher(message):
@@ -91,43 +134,48 @@ async def btn_check_photos(message: Message):
     
     if not storage.has_photos():
         await message.answer(
-            "⚠️ Нет фотографий для проверки!\n"
-            "Перешлите фотографии тетрадей учеников.",
+            "⚠️ Нет работ для проверки!\n"
+            "Нажмите '📷 Добавить работы' и перешлите фото тетрадей.",
             reply_markup=get_main_menu()
         )
         return
     
     # Показываем статус начала проверки
     processing_msg = await message.answer(
-        f"🔍 Начинаю проверку {len(storage.student_photos)} фотографий...\n"
+        f"🔍 Начинаю проверку {len(storage.student_photos)} работ...\n"
         f"Это может занять 1-2 минуты."
     )
     
-    # Скачиваем и конвертируем фото в base64
-    photos_base64 = []
+    # Скачиваем все фото
     bot = message.bot
     
     try:
-        for i, file_id in enumerate(storage.student_photos, 1):
-            await processing_msg.edit_text(
-                f"🔍 Обрабатываю фото {i}/{len(storage.student_photos)}..."
-            )
-            
+        # Скачиваем фото задания
+        task_photos_bytes = []
+        for i, file_id in enumerate(storage.task_photos, 1):
+            await processing_msg.edit_text(f"🔍 Загружаю задание ({i}/{len(storage.task_photos)})...")
             file = await bot.get_file(file_id)
             photo_bytes = await bot.download_file(file.file_path)
-            photo_b64 = base64.b64encode(photo_bytes.read()).decode('utf-8')
-            photos_base64.append(photo_b64)
+            task_photos_bytes.append(photo_bytes.read())
         
-        await processing_msg.edit_text("🤖 Отправляю на анализ AI модели...")
+        # Скачиваем фото работ
+        student_photos_bytes = []
+        for i, file_id in enumerate(storage.student_photos, 1):
+            await processing_msg.edit_text(f"🔍 Загружаю работы ({i}/{len(storage.student_photos)})...")
+            file = await bot.get_file(file_id)
+            photo_bytes = await bot.download_file(file.file_path)
+            student_photos_bytes.append(photo_bytes.read())
         
-        # Отправляем в Nemotron
-        result = await nemotron.check_homework(
-            task=storage.task_text,
-            photos_base64=photos_base64,
+        await processing_msg.edit_text("🤖 Отправляю на анализ Gemini...")
+        
+        # Отправляем в Gemini
+        result = await gemini.check_homework(
+            task_photos_bytes=task_photos_bytes,
+            student_photos_bytes=student_photos_bytes,
             captions=storage.photo_captions
         )
         
-        # Отправляем результат (разбиваем на части если слишком длинный)
+        # Отправляем результат
         await processing_msg.delete()
         
         # Telegram лимит - 4096 символов
@@ -165,9 +213,23 @@ async def btn_show_task(message: Message):
     
     await message.answer(
         f"📋 <b>Текущее задание:</b>\n\n"
-        f"{storage.task_text}\n\n"
+        f"Фото задания: {len(storage.task_photos)}\n\n"
         f"📊 <b>Статус:</b>\n{storage.get_status()}",
         parse_mode="HTML",
+        reply_markup=get_main_menu()
+    )
+
+
+@router.message(F.text == "🗑️ Очистить всё")
+async def btn_clear_task(message: Message):
+    """Очистка задания и всех работ"""
+    if not check_teacher(message):
+        return
+    
+    storage.clear_task()
+    await message.answer(
+        "✅ Всё очищено!\n\n"
+        "Можете установить новое задание.",
         reply_markup=get_main_menu()
     )
 
@@ -183,39 +245,13 @@ async def cmd_cancel(message: Message, state: FSMContext):
     await message.answer("❌ Действие отменено.", reply_markup=get_main_menu())
 
 
-@router.message(StateFilter(HomeworkStates.waiting_for_task))
-async def receive_task(message: Message, state: FSMContext):
-    """Получение текста задания"""
-    if not check_teacher(message):
-        return
-    
-    # Берем текст или caption
-    task_text = message.text or message.caption or ""
-    
-    if not task_text.strip():
-        await message.answer("⚠️ Пустое сообщение. Отправьте текст задания.")
-        return
-    
-    storage.set_task(task_text.strip())
-    await state.clear()
-    
-    await message.answer(
-        f"✅ <b>Задание установлено!</b>\n\n"
-        f"{task_text[:500]}{'...' if len(task_text) > 500 else ''}\n\n"
-        f"Теперь пересылайте фотографии тетрадей учеников.",
-        parse_mode="HTML",
-        reply_markup=get_main_menu()
-    )
-
-
-# Автоматическое добавление фото при пересылке
-@router.message(F.photo)
-async def receive_photo(message: Message):
+# Автоматическое добавление фото работ
+@router.message(F.photo, ~StateFilter(HomeworkStates.waiting_for_task))
+async def receive_student_photo(message: Message):
     """Получение фотографии (работы ученика)"""
     if not check_teacher(message):
         return
     
-    # Берем фото максимального размера
     photo = message.photo[-1]
     
     # Проверяем, есть ли задание
@@ -232,9 +268,9 @@ async def receive_photo(message: Message):
     num = storage.add_photo(photo.file_id, caption)
     
     await message.answer(
-        f"✅ Фото добавлено в очередь проверки (#{num})\n"
-        f"Всего фото в очереди: {len(storage.student_photos)}\n\n"
-        f"Нажмите '📷 Проверить тетради' когда будете готовы.",
+        f"✅ Работа добавлена в очередь (#{num})\n"
+        f"Всего работ в очереди: {len(storage.student_photos)}\n\n"
+        f"Нажмите '🔍 Проверить работы' когда будете готовы.",
         reply_markup=get_main_menu()
     )
 
@@ -245,12 +281,8 @@ async def unknown_text(message: Message):
     if not check_teacher(message):
         return
     
-    # Если есть активное состояние - не реагируем
-    # Иначе показываем меню
-    if message.text not in ["📝 Новое задание", "📷 Проверить тетради", 
-                            "🗑️ Очистить задание", "📋 Показать задание"]:
-        await message.answer(
-            "🤔 Не понимаю команду.\n"
-            "Используйте кнопки меню ниже.",
-            reply_markup=get_main_menu()
-        )
+    await message.answer(
+        "🤔 Не понимаю команду.\n"
+        "Используйте кнопки меню ниже.",
+        reply_markup=get_main_menu()
+    )
